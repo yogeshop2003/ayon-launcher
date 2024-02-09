@@ -176,6 +176,18 @@ if "--ayon-login" in sys.argv:
     sys.argv.remove("--ayon-login")
     SHOW_LOGIN_UI = True
 
+# Login mode is helper to detect if user is using AYON server credentials
+#   from login UI (and keyring), or from environment variables.
+# - Variable is set in first AYON launcher process for possible subprocesses
+if SHOW_LOGIN_UI:
+    # Make sure login mode is set to '1' when '--ayon-login' is passed
+    os.environ["AYON_IN_LOGIN_MODE"] = "1"
+
+elif "AYON_IN_LOGIN_MODE" not in os.environ:
+    os.environ["AYON_IN_LOGIN_MODE"] = (
+        "0" if "AYON_API_KEY" in os.environ else "1"
+    )
+
 if "--headless" in sys.argv:
     os.environ["AYON_HEADLESS_MODE"] = "1"
     os.environ["OPENPYPE_HEADLESS_MODE"] = "1"
@@ -198,6 +210,7 @@ elif (
 
 IS_BUILT_APPLICATION = getattr(sys, "frozen", False)
 HEADLESS_MODE_ENABLED = os.getenv("AYON_HEADLESS_MODE") == "1"
+AYON_IN_LOGIN_MODE = os.environ["AYON_IN_LOGIN_MODE"] == "1"
 
 _pythonpath = os.getenv("PYTHONPATH", "")
 _python_paths = _pythonpath.split(os.pathsep)
@@ -304,6 +317,7 @@ from ayon_common.connection.credentials import (
     set_environments,
     create_global_connection,
     confirm_server_login,
+    show_invalid_credentials_ui,
 )
 from ayon_common.distribution import (
     AyonDistribution,
@@ -383,23 +397,49 @@ def _connect_to_ayon_server(force=False):
         force (Optional[bool]): Force login to server.
     """
 
-    load_environments()
-    need_login = True
-    if not force:
-        need_login = need_server_or_login()
-
-    if not need_login:
-        return
-
-    if HEADLESS_MODE_ENABLED:
-        _print("!!! Cannot open Login dialog in headless mode.")
-        _print((
-            "!!! Please use `{}` to specify server address"
-            " and '{}' to specify user's token."
-        ).format(SERVER_URL_ENV_KEY, SERVER_API_ENV_KEY))
+    if force and HEADLESS_MODE_ENABLED:
+        _print("!!! Login UI was requested in headless mode.")
         sys.exit(1)
 
+    load_environments()
+    need_server = need_api_key = True
+    if not force:
+        need_server, need_api_key = need_server_or_login()
+
     current_url = os.environ.get(SERVER_URL_ENV_KEY)
+    if not need_server and not need_api_key:
+        _print(f">>> Connected to AYON server {current_url}")
+        return
+
+    if need_server:
+        if current_url:
+            message = f"Could not connect to AYON server '{current_url}'."
+        else:
+            message = "AYON Server URL is not set."
+    elif os.environ.get(SERVER_API_ENV_KEY):
+        message = f"Invalid API key for '{current_url}'."
+    else:
+        message = f"Missing API key for '{current_url}'."
+
+    if not force:
+        _print("!!! Got invalid credentials.")
+        _print(message)
+
+    # Exit in headless mode
+    if HEADLESS_MODE_ENABLED:
+        _print((
+            f"!!! Please use '{SERVER_URL_ENV_KEY}'"
+            f" and '{SERVER_API_ENV_KEY}' environment variables to specify"
+            " valid server url and api key for headless mode."
+        ))
+        sys.exit(1)
+
+    # Show message that used credentials are invalid
+    if not AYON_IN_LOGIN_MODE:
+        show_invalid_credentials_ui(message=message, in_subprocess=True)
+        sys.exit(1)
+
+    # Show login dialog
     url, token, username = ask_to_login_ui(current_url, always_on_top=True)
     if url is not None and token is not None:
         confirm_server_login(url, token, username)
@@ -657,11 +697,11 @@ def boot():
 
 def _on_main_addon_missing():
     if HEADLESS_MODE_ENABLED:
-        raise RuntimeError("Failed to import required OpenPype addon.")
+        raise RuntimeError("Failed to import required AYON core addon.")
     show_startup_error(
-        "Missing OpenPype addon",
+        "Missing core addon",
         (
-            "AYON-launcher requires OpenPype addon to be able to start."
+            "AYON-launcher requires AYON core addon to be able to start."
             "<br/><br/>Please contact your administrator"
             " to resolve the issue."
         )
@@ -672,7 +712,7 @@ def _on_main_addon_missing():
 def _on_main_addon_import_error():
     if HEADLESS_MODE_ENABLED:
         raise RuntimeError(
-            "Failed to import OpenPype addon. Probably because"
+            "Failed to import AYON core addon. Probably because"
             " of missing or incompatible dependency package"
         )
     show_startup_error(
@@ -687,14 +727,7 @@ def _on_main_addon_import_error():
     sys.exit(1)
 
 
-def main_cli():
-    """Main startup logic.
-
-    This is the main entry point for the AYON launcher. At this
-    moment is fully dependent on 'openpype' addon. Which means it
-    contains more logic than it should.
-    """
-
+def _main_cli_openpype():
     try:
         from openpype import PACKAGE_DIR
     except ImportError:
@@ -708,6 +741,7 @@ def main_cli():
     python_path = os.getenv("PYTHONPATH", "")
     split_paths = python_path.split(os.pathsep)
 
+    # TODO move to ayon core import
     additional_paths = [
         # add OpenPype tools
         os.path.join(PACKAGE_DIR, "tools"),
@@ -716,8 +750,10 @@ def main_cli():
         os.path.join(PACKAGE_DIR, "vendor", "python", "common")
     ]
     for path in additional_paths:
-        split_paths.insert(0, path)
-        sys.path.insert(0, path)
+        if path not in split_paths:
+            split_paths.insert(0, path)
+        if path not in sys.path:
+            sys.path.insert(0, path)
     os.environ["PYTHONPATH"] = os.pathsep.join(split_paths)
 
     _print(">>> loading environments ...")
@@ -743,6 +779,52 @@ def main_cli():
 
     try:
         cli.main(obj={}, prog_name="ayon")
+    except Exception:  # noqa
+        exc_info = sys.exc_info()
+        _print("!!! AYON crashed:")
+        traceback.print_exception(*exc_info)
+        sys.exit(1)
+
+
+def main_cli():
+    """Main startup logic.
+
+    This is the main entry point for the AYON launcher. At this
+    moment is fully dependent on 'ayon_core' addon. Which means it
+    contains more logic than it should.
+    """
+
+    try:
+        import ayon_core
+        ayon_core_used = True
+    except ImportError:
+        ayon_core_used = False
+
+    if not ayon_core_used:
+        return _main_cli_openpype()
+
+    try:
+        from ayon_core import cli
+    except ImportError:
+        _on_main_addon_import_error()
+
+    # print info when not running scripts defined in 'silent commands'
+    if not SKIP_HEADERS:
+        info = get_info(is_staging_enabled(), is_dev_mode_enabled())
+        info.insert(0, f">>> Using AYON from [ {AYON_ROOT} ]")
+
+        t_width = 20
+        with contextlib.suppress(ValueError, OSError):
+            t_width = os.get_terminal_size().columns - 2
+
+        _header = f"*** AYON [{__version__}] "
+        info.insert(0, _header + "-" * (t_width - len(_header)))
+
+        for i in info:
+            _print(i)
+
+    try:
+        cli.main()
     except Exception:  # noqa
         exc_info = sys.exc_info()
         _print("!!! AYON crashed:")
@@ -846,6 +928,12 @@ def get_info(use_staging=None, use_dev=None) -> list:
 
 def main():
     if SHOW_LOGIN_UI:
+        if HEADLESS_MODE_ENABLED:
+            _print((
+                "!!! Invalid arguments combination"
+                " '--ayon-login' and '--headless'."
+            ))
+            sys.exit(1)
         _connect_to_ayon_server(True)
 
     if SKIP_BOOTSTRAP:
