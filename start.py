@@ -282,8 +282,8 @@ os.environ["OPENPYPE_EXECUTABLE"] = sys.executable
 os.environ["AYON_ROOT"] = AYON_ROOT
 os.environ["OPENPYPE_ROOT"] = AYON_ROOT
 os.environ["OPENPYPE_REPOS_ROOT"] = AYON_ROOT
-os.environ["AYON_MENU_LABEL"] = "BLACK"
-os.environ["AVALON_LABEL"] = "BLACK"
+os.environ["AYON_MENU_LABEL"] = "AYON"
+os.environ["AVALON_LABEL"] = "AYON"
 
 import blessed  # noqa: E402
 import certifi  # noqa: E402
