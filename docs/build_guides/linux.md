@@ -2,7 +2,7 @@
 
 **WARNING:** Linux needs distribution specific steps.
 
-## Requirements
+## Requirementss
 ---
 
 To build AYON you will need some tools and libraries. We do not provide any of these tools. You have to install them yourself.
